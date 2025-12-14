@@ -1,0 +1,874 @@
+---
+title: "Reglas de Asociación: Trabajo Final"
+author: "Oscar Julian Tinjacá Reyes"
+date: "2025-12-15"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    number_sections: true
+    highlight: tango
+    df_print: kable
+  html_document:
+    df_print: paged
+    code_folding: hide
+  word_document: default
+geometry: left=2cm, right=2cm, top=2cm, bottom=2cm
+fontsize: 10pt
+linestretch: 1.0
+toc: true
+toc_depth: 4
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+install.packages("arules")
+install.packages("arulesViz")
+install.packages("tidyverse")
+
+library(arules)
+library(arulesViz)
+library(tidyverse)
+```
+
+# Introducción
+
+En este trabajo se analizan **reglas de asociación** a partir de datos reales relacionados con campañas de vacunación frente a la gripe **H1N1** y la gripe **estacional**. El objetivo principal consiste en extraer patrones interesantes que relacionen características demográficas, comportamientos preventivos y opiniones sobre las vacunas con la probabilidad de haber sido vacunado.
+
+El conjunto de datos procede de la competición *"Flu Shot Learning: Predict H1N1 and Seasonal Flu Vaccines"* de DrivenData, basada en la encuesta nacional estadounidense *"National 2009 H1N1 Flu Survey"*. Cada instancia representa a una persona encuestada y recoge información sobre:
+
+- Nivel de preocupación y conocimiento sobre la gripe H1N1.  
+- Comportamientos de prevención (lavado de manos, uso de mascarilla, evitar contactos, etc.).  
+- Recomendaciones médicas y presencia de condiciones crónicas.  
+- Características demográficas y socioeconómicas (edad, educación, ingresos, estado civil, etc.).  
+- Estructura del hogar y localización geográfica.  
+
+Para cada individuo se dispone de dos variables objetivo binarias:
+
+- `h1n1_vaccine`: indica si se recibió la vacuna H1N1.  
+- `seasonal_vaccine`: indica si se recibió la vacuna de la gripe estacional.  
+
+En este trabajo, en lugar de plantear un problema de predicción supervisada, se emplean técnicas de **reglas de asociación** con el fin de descubrir dependencias y patrones interesantes entre todas estas variables.
+
+# Presentación del dataset
+
+## Descripción general
+
+El dataset original contiene **36 variables**:
+
+- `respondent_id`: identificador único y aleatorio del encuestado.  
+- 35 variables predictoras, que incluyen:
+    - Opiniones y percepciones (`h1n1_concern`, `h1n1_knowledge`, `opinion_*`).  
+    - Comportamientos preventivos (`behavioral_*`).  
+    - Variables de salud y recomendación médica (`doctor_recc_*`, `chronic_med_condition`, etc.).  
+    - Variables demográficas y socioeconómicas (`age_group`, `education`, `race`, `sex`, `income_poverty`, etc.).  
+    - Estructura del hogar (`household_adults`, `household_children`).  
+    - Variables geográficas (`hhs_geo_region`, `census_msa`).  
+    - Sector e industria de empleo (`employment_industry`, `employment_occupation`).  
+
+Adicionalmente, se dispone de las dos variables objetivo:
+
+- `h1n1_vaccine` (0 = no vacunado, 1 = vacunado).  
+- `seasonal_vaccine` (0 = no vacunado, 1 = vacunado).
+
+### Fuente de los datos
+
+Los datos originales se encuentran disponibles públicamente en la plataforma DrivenData dentro de la competición:
+
+- *"Flu Shot Learning: Predict H1N1 and Seasonal Flu Vaccines"*  
+  https://www.drivendata.org/competitions/66/flu-shot-learning/  
+
+La descripción detallada de las variables puede consultarse en la página oficial del problema:
+
+- *Problem description*  
+  https://www.drivendata.org/competitions/66/flu-shot-learning/page/211/
+
+## Carga y unión de los datos
+
+En primer lugar se cargan los ficheros de características (`training_set_features.csv`) y etiquetas (`training_set_labels.csv`), y se unen por la columna común `respondent_id`.
+
+```{r, include=FALSE}
+# Cargar datos (ajusta la ruta si hace falta)
+
+features <- read.csv("https://raw.githubusercontent.com/Ojtinjacar/association-rules-flu-survey/main/data/training_set_features.csv",
+                     stringsAsFactors = FALSE,
+                     na.strings = c("NA", "NaN", ""))
+
+labels   <- read.csv("https://raw.githubusercontent.com/Ojtinjacar/association-rules-flu-survey/main/data/training_set_labels.csv",
+                     stringsAsFactors = FALSE,
+                     na.strings = c("NA", "NaN", ""))
+
+# Unir por la primera columna: respondent_id
+flu_raw <- inner_join(features, labels, by = "respondent_id") %>% select(-respondent_id)
+
+# Comprobación rápida
+str(flu_raw[, 1:10])
+
+```
+
+# Preprocesamiento de los datos
+
+A continuación se describe la lista de **preprocesos** aplicados a los datos.
+
+```{r, include=FALSE}
+## Helpers: funciones para factores
+
+bin_factor <- function(x) {
+  factor(x, levels = c(0, 1), labels = c("no", "yes"))
+}
+
+ord_factor <- function(x, levels, labels = levels) {
+  factor(x, levels = levels, labels = labels, ordered = TRUE)
+}
+```
+
+- Conversión de variables a factores
+
+```{r, include=FALSE}
+
+flu <- flu_raw
+
+## Variables ordinales tipo Likert
+
+flu$h1n1_concern <- ord_factor(
+  flu$h1n1_concern,
+  levels = c(0, 1, 2, 3),
+  labels = c("not_at_all", "not_very", "somewhat", "very")
+)
+
+flu$h1n1_knowledge <- ord_factor(
+  flu$h1n1_knowledge,
+  levels = c(0, 1, 2),
+  labels = c("no_knowledge", "a_little", "a_lot")
+)
+
+flu$opinion_h1n1_vacc_effective <- ord_factor(
+  flu$opinion_h1n1_vacc_effective,
+  levels = 1:5,
+  labels = c("not_at_all", "not_very", "dont_know", "somewhat", "very")
+)
+
+flu$opinion_h1n1_risk <- ord_factor(
+  flu$opinion_h1n1_risk,
+  levels = 1:5,
+  labels = c("very_low", "somewhat_low", "dont_know", "somewhat_high", "very_high")
+)
+
+flu$opinion_h1n1_sick_from_vacc <- ord_factor(
+  flu$opinion_h1n1_sick_from_vacc,
+  levels = 1:5,
+  labels = c("not_at_all", "not_very", "dont_know", "somewhat", "very")
+)
+
+flu$opinion_seas_vacc_effective <- ord_factor(
+  flu$opinion_seas_vacc_effective,
+  levels = 1:5,
+  labels = c("not_at_all", "not_very", "dont_know", "somewhat", "very")
+)
+
+flu$opinion_seas_risk <- ord_factor(
+  flu$opinion_seas_risk,
+  levels = 1:5,
+  labels = c("very_low", "somewhat_low", "dont_know", "somewhat_high", "very_high")
+)
+
+flu$opinion_seas_sick_from_vacc <- ord_factor(
+  flu$opinion_seas_sick_from_vacc,
+  levels = 1:5,
+  labels = c("not_at_all", "not_very", "dont_know", "somewhat", "very")
+)
+
+## Variables binarias (comportamientos y salud)
+
+binary_behavioral <- c(
+  "behavioral_antiviral_meds",
+  "behavioral_avoidance",
+  "behavioral_face_mask",
+  "behavioral_wash_hands",
+  "behavioral_large_gatherings",
+  "behavioral_outside_home",
+  "behavioral_touch_face"
+)
+
+flu[binary_behavioral] <- lapply(flu[binary_behavioral], bin_factor)
+
+binary_health <- c(
+  "doctor_recc_h1n1",
+  "doctor_recc_seasonal",
+  "chronic_med_condition",
+  "child_under_6_months",
+  "health_worker",
+  "health_insurance"
+)
+
+flu[binary_health] <- lapply(flu[binary_health], bin_factor)
+
+## Targets (variables objetivo)
+flu$h1n1_vaccine     <- bin_factor(flu$h1n1_vaccine)
+flu$seasonal_vaccine <- bin_factor(flu$seasonal_vaccine)
+
+## Categóricas nominales
+
+cat_vars <- c(
+  "age_group",
+  "education",
+  "race",
+  "sex",
+  "income_poverty",
+  "marital_status",
+  "rent_or_own",
+  "employment_status",
+  "hhs_geo_region",
+  "census_msa",
+  "employment_industry",
+  "employment_occupation"
+)
+
+flu[cat_vars] <- lapply(flu[cat_vars], factor)
+
+
+flu$household_adults <- ord_factor(
+  flu$household_adults,
+  levels = 0:3,
+  labels = c("adults_0", "adults_1", "adults_2", "adults_3plus")
+)
+
+flu$household_children <- ord_factor(
+  flu$household_children,
+  levels = 0:3,
+  labels = c("children_0", "children_1", "children_2", "children_3plus")
+)
+```
+
+- Tratamiento de valores ausentes
+
+    - En las variables nominales y en las relacionadas con la estructura del hogar, los valores ausentes (`NA`) se convierten en una categoría explícita *"unknown"* para evitar la pérdida de información y poder analizar patrones asociados a la falta de respuesta o información desconocida. En cambio, en las variables binarias y ordinales de opinión, los `NA` se mantienen, de forma que no generan ítems artificiales en el conjunto de transacciones.
+
+```{r, include=FALSE}
+
+## NA -> "unknown" SOLO en nominales + household
+
+vars_nominal <- c(
+  "age_group",
+  "education",
+  "race",
+  "sex",
+  "income_poverty",
+  "marital_status",
+  "rent_or_own",
+  "employment_status",
+  "hhs_geo_region",
+  "census_msa",
+  "employment_industry",
+  "employment_occupation"
+)
+
+vars_household <- c("household_adults", "household_children")
+
+vars_unknown <- c(vars_nominal, vars_household)
+
+for (v in vars_unknown) {
+  flu[[v]] <- addNA(flu[[v]])                        # convierte NA en nivel del factor
+  levels(flu[[v]])[is.na(levels(flu[[v]]))] <- "unknown"  # renombra ese nivel como "unknown"
+}
+```
+
+- Renombrado de niveles (*snake_case*)
+
+    - Con el fin de facilitar la interpretación de las reglas de asociación, se renombraron los niveles de algunas variables nominales a un formato consistente en *snake_case*.
+
+```{r, include=FALSE}
+## Renombrar niveles específicos para consistencia
+## age_group
+levels(flu$age_group)[levels(flu$age_group) == "18 - 34 Years"] <- "age_18_34"
+levels(flu$age_group)[levels(flu$age_group) == "35 - 44 Years"] <- "age_35_44"
+levels(flu$age_group)[levels(flu$age_group) == "45 - 54 Years"] <- "age_45_54"
+levels(flu$age_group)[levels(flu$age_group) == "55 - 64 Years"] <- "age_55_64"
+levels(flu$age_group)[levels(flu$age_group) == "65+ Years"]     <- "age_65plus"
+# "unknown" ya está en minúsculas
+
+## education
+levels(flu$education)[levels(flu$education) == "< 12 Years"]       <- "edu_lt_12"
+levels(flu$education)[levels(flu$education) == "12 Years"]         <- "edu_12"
+levels(flu$education)[levels(flu$education) == "Some College"]     <- "edu_some_college"
+levels(flu$education)[levels(flu$education) == "College Graduate"] <- "edu_college_grad"
+
+## income_poverty
+levels(flu$income_poverty)[levels(flu$income_poverty) == "<= $75,000, Above Poverty"] <- "inc_leq_75k_above_pov"
+levels(flu$income_poverty)[levels(flu$income_poverty) == "> $75,000"]                 <- "inc_gt_75k"
+levels(flu$income_poverty)[levels(flu$income_poverty) == "Below Poverty"]             <- "inc_below_pov"
+
+## marital_status
+levels(flu$marital_status)[levels(flu$marital_status) == "Married"]      <- "married"
+levels(flu$marital_status)[levels(flu$marital_status) == "Not Married"]  <- "not_married"
+
+## race
+levels(flu$race)[levels(flu$race) == "Black"]              <- "black"
+levels(flu$race)[levels(flu$race) == "Hispanic"]           <- "hispanic"
+levels(flu$race)[levels(flu$race) == "White"]              <- "white"
+levels(flu$race)[levels(flu$race) == "Other or Multiple"]  <- "other_multiple"
+
+## sex
+levels(flu$sex)[levels(flu$sex) == "Female"] <- "female"
+levels(flu$sex)[levels(flu$sex) == "Male"]   <- "male"
+
+## rent_or_own
+levels(flu$rent_or_own)[levels(flu$rent_or_own) == "Own"]  <- "own"
+levels(flu$rent_or_own)[levels(flu$rent_or_own) == "Rent"] <- "rent"
+
+## employment_status
+levels(flu$employment_status)[levels(flu$employment_status) == "Employed"]            <- "employed"
+levels(flu$employment_status)[levels(flu$employment_status) == "Unemployed"]          <- "unemployed"
+levels(flu$employment_status)[levels(flu$employment_status) == "Not in Labor Force"]  <- "not_in_labor_force"
+
+## census_msa
+levels(flu$census_msa)[levels(flu$census_msa) == "MSA, Not Principle  City"] <- "msa_not_principal_city"
+levels(flu$census_msa)[levels(flu$census_msa) == "MSA, Principle City"]      <- "msa_principal_city"
+levels(flu$census_msa)[levels(flu$census_msa) == "Non-MSA"]                  <- "non_msa"
+```
+
+
+```{r, include=FALSE}
+str(flu)
+```
+
+# Exploración descriptiva de las variables
+
+```{r, include=FALSE}
+flu_transaction <- as(flu, "transactions")
+
+summary(flu_transaction)
+```
+
+## Frecuencia de ítems en el conjunto de datos
+
+En esta sección se analiza la frecuencia relativa de los ítems con mayor presencia en el conjunto de transacciones, lo que permite identificar cuáles variables aparecen con más regularidad en los datos.
+
+### Ítems con frecuencia alta (soporte > 0.5)
+```{r, fig.width=16, fig.height=8, echo=FALSE}
+freq <- itemFrequency(flu_transaction)
+
+items_high <- names(freq[freq > 0.5])
+items_low <- names(freq[freq >= 0.1 & freq <= 0.5])
+
+# Subconjuntos de transacciones (manteniendo solo esos ítems)
+flu_high <- flu_transaction[, items_high]
+flu_low  <- flu_transaction[, items_low]
+
+
+itemFrequencyPlot(
+  flu_high,
+  topN = length(items_high),
+  support = 0,
+  col = "tomato",
+  ylab = "Frecuencia"
+)
+```
+
+### Ítems con frecuencia media (0.1 ≤ soporte ≤ 0.5)
+
+```{r, fig.width=16, fig.height=8, echo=FALSE}
+
+itemFrequencyPlot(
+  flu_low,
+  topN = length(items_low),
+  support = 0,
+  col = "tomato",
+  ylab = "Frecuencia"
+)
+
+# itemFrequencyPlot(flu_transaction, support = 0.1, cex.names=0.8, ylab="Frecuencia de los Items")
+```
+
+```{r, include=FALSE}
+i_flu <- apriori(flu_transaction, parameter = list(support = 0.1, target="frequent"))
+i_flu <- sort(i_flu, by="support")
+inspect(head(i_flu, n=10))
+
+```
+
+## Distribución del tamaño de los *itemsets*
+
+En la gráfica correspondiente se observa un patrón ascendente: a medida que aumenta el tamaño del *itemset*, su frecuencia también crece, alcanzando el máximo en los *itemsets* de tamaño 7.
+
+```{r, echo=FALSE, fig.width=6, fig.height=4}
+barplot(table(size(i_flu)), xlab="Tamaño Itemset", ylab="Conteo", col = "tomato")
+```
+
+
+```{r, include=FALSE}
+i_flu_3 <- sort(i_flu[size(i_flu) == 3], by = "support")
+inspect(head(i_flu_3, 10))
+```
+
+```{r, include=FALSE}
+i_flu_maximal <- i_flu[is.maximal(i_flu)]
+i_flu_maximal <- sort(i_flu_maximal, by = "support")
+inspect(head(i_flu_maximal, 10))
+```
+
+```{r, include=FALSE}
+i_flu_closed <- i_flu[is.closed(i_flu)]
+i_flu_closed <- sort(i_flu_closed, by = "support")
+inspect(head(i_flu_closed, 10))
+```
+
+## Comparación de *itemsets* frecuentes, cerrados y maximales
+
+En la siguiente gráfica se comparan las cantidades totales de *itemsets* generados. Se observa que los **frecuentes** y **cerrados** son similares en número, mientras que los **maximales** representan una fracción mucho menor del conjunto total.
+
+```{r, echo=FALSE, fig.width=6, fig.height=4}
+barplot(
+  c(
+    frequent = length(i_flu),
+    closed = length(i_flu_closed),
+    maximal = length(i_flu_maximal)
+  ),
+  ylab = "Número de itemsets",
+  col = "tomato",
+)
+```
+
+## Relación entre soporte, confianza y *lift* en las reglas generadas (con *support* ≥ 0.1)
+
+En esta parte se visualiza la distribución conjunta de la **confianza** y el **lift** en las reglas generadas, destacando zonas donde estos valores tienden a agruparse.
+
+Las reglas con mayor *lift* se concentran sobre todo en la zona donde la confianza oscila entre 0.5–0.7 y 0.8–0.9. Sin embargo, a lo largo del documento se exploran reglas distribuidas por todo el conjunto de datos.
+
+```{r, include=FALSE}
+rules <- apriori(
+  flu_transaction,
+  parameter = list(
+    support = 0.1,
+    confidence = 0.30,
+    minlen = 1,
+    maxlen = 4
+  )
+)
+
+summary(rules)
+inspect(head(sort(rules, by = "lift"), 10))
+```
+
+```{r, echo=FALSE, fig.width=6, fig.height=4}
+plot(rules)
+```
+
+```{r, include=FALSE}
+rules_conf_05_07 <- subset(
+  rules,
+  subset = confidence >= 0.5 & confidence <= 0.7
+)
+
+rules_conf_05_07_lift <- subset(
+  rules_conf_05_07,
+  subset = lift >= 1.2
+)
+
+inspect(head(sort(rules_conf_05_07_lift, by = "lift"), 10))
+plot(rules_conf_05_07_lift)
+```
+
+```{r, include=FALSE}
+rules_conf_08_09 <- subset(
+  rules,
+  subset = confidence >= 0.8 & confidence <= 0.9
+)
+
+rules_conf_08_09_lift <- subset(
+  rules_conf_08_09,
+  subset = lift >= 1.3
+)
+
+inspect(head(sort(rules_conf_08_09_lift, by = "lift"), 10))
+plot(rules_conf_08_09_lift)
+```
+
+# Generación de reglas de asociación
+
+## Regla 1: El consecuente es la vacunación H1N1
+
+Se seleccionan las reglas cuyo consecuente (`rhs`) corresponde a la vacunación H1N1, con el objetivo de aislar patrones que describen perfiles con una mayor probabilidad de vacunarse.
+
+```{r, echo=FALSE, fig.width=6, fig.height=4}
+rules_h1n1 <- subset(
+  rules,
+  subset = rhs %ain% "h1n1_vaccine=yes" & lift >= 1.3
+)
+plot(rules_h1n1)
+```
+
+```{r, echo=FALSE}
+#inspect(head(sort(rules_h1n1, by="lift"), 20))
+`rownames<-`(as(head(sort(rules_h1n1, by="lift"), 5), "data.frame")[, c("rules","confidence","lift")], NULL)
+```
+
+Al revisar las primeras reglas se observa un patrón muy evidente: casi todas incluyen `health_insurance = "yes"` y `seasonal_vaccine = "yes"`. Esto resulta coherente, ya que las personas que disponen de **seguro médico** y se vacunan de forma habitual tienden a recibir también la vacuna frente a la gripe H1N1. Sin embargo, estas reglas no aportan información novedosa, pues principalmente confirman una relación esperable.
+
+Con el fin de descubrir patrones más específicos, se decide eliminar de las reglas todos los casos en los que aparecen estas dos variables tan dominantes. La idea es analizar qué relaciones persisten cuando se dejan fuera el **seguro médico** y la **vacunación estacional** del antecedente.
+
+```{r, echo=FALSE}
+rules_wo_insurance <- subset(
+  rules_h1n1,
+  subset = 
+    !(lhs %pin% "seasonal_vaccine") & 
+    !(lhs %pin% "health_insurance") &
+    lift >= 1.3
+)
+rules_wo_insurance_redundant <- is.redundant(rules_wo_insurance)
+rules_wo_insurance_no_redundant <- rules_wo_insurance[!rules_wo_insurance_redundant]
+`rownames<-`(as(head(sort(rules_wo_insurance_no_redundant, by="lift"), 10), "data.frame")[, c("rules","confidence","lift")], NULL)
+```
+
+El resultado de este filtrado produce un conjunto de reglas más informativas y menos redundantes. Entre ellas destaca especialmente la siguiente:
+
+\[
+\{\texttt{doctor\_recc\_seasonal = yes}\}
+\Rightarrow
+\{\texttt{h1n1\_vaccine = yes}\}
+\]
+
+Esta regla presenta un soporte cercano al 10 % de la muestra, una confianza aproximada del 35 % y un *lift* cercano a 1.64. Su interpretación resulta especialmente interesante porque revela un fenómeno de **transferencia entre campañas de vacunación**: las personas que reciben una recomendación médica para vacunarse de la gripe estacional muestran una probabilidad significativamente mayor de vacunarse también frente a la gripe H1N1.
+
+## Regla 2: El consecuente es la vacunación estacional
+
+En esta sección se seleccionan las reglas cuyo consecuente (`rhs`) corresponde a la vacunación estacional (`seasonal_vaccine = "yes"`), con el objetivo de aislar patrones que describen perfiles con una mayor probabilidad de haberse vacunado contra la gripe estacional.
+
+```{r, echo=FALSE, fig.width=6, fig.height=4}
+rules_seasonal <- subset(
+  rules,
+  subset = rhs %ain% "seasonal_vaccine=yes" & lift >= 1.3
+)
+plot(rules_seasonal)
+```
+
+```{r, echo=FALSE}
+# inspect(head(sort(rules_seasonal, by="lift"), 5))
+`rownames<-`(as(head(sort(rules_seasonal, by="lift"), 5), "data.frame")[, c("rules","confidence","lift")], NULL)
+```
+
+Al revisar las primeras reglas se observan nuevamente relaciones muy esperables: por ejemplo, aquellas en las que intervienen la **recomendación médica** o la **vacunación contra H1N1**, ambas variables estrechamente vinculadas al comportamiento vacunal estacional. Estas reglas resultan útiles para validar el enfoque inicial, pero no aportan información novedosa, ya que simplemente confirman patrones altamente previsibles.
+
+Por este motivo, se decide filtrar las reglas eliminando del antecedente (`lhs`) cualquier aparición de `doctor_recc_seasonal` y `h1n1_vaccine`. El objetivo consiste en aislar asociaciones menos obvias y detectar qué otros factores continúan vinculados a la vacunación estacional una vez retirados estos predictores tan fuertes.
+
+```{r, echo=FALSE}
+rules_wo_doctor_recc <- subset(
+  rules_seasonal,
+  subset = 
+    !(lhs %pin% "h1n1_vaccine") & 
+    !(lhs %pin% "doctor_recc_seasonal") &
+    lift >= 1.3
+)
+rules_wo_doctor_recc_clean <- is.redundant(rules_wo_doctor_recc)
+rules_wo_doctor_recc_clean <- rules_wo_doctor_recc[!rules_wo_insurance_redundant]
+# inspect(head(sort(rules_wo_doctor_recc_clean, by="lift"), 20))
+`rownames<-`(as(head(sort(rules_wo_doctor_recc_clean, by="lift"), 5), "data.frame")[, c("rules","confidence","lift")], NULL)
+```
+
+Una de las reglas más informativas tras el filtrado es la siguiente:
+
+\[
+\{\texttt{opinion\_seas\_vacc\_effective = very},\; \texttt{age\_group = age\_65plus}\}
+\Rightarrow
+\{\texttt{seasonal\_vaccine = yes}\}
+\]
+
+Esta asociación revela un patrón muy consistente: entre las personas **mayores de 65 años** que consideran la vacuna estacional *muy efectiva*, la probabilidad de estar vacunadas es especialmente alta (confianza aproximada de 0.83). El soporte en torno al 10 % indica que este grupo no es marginal dentro de la muestra, y el *lift* superior a 1.7 muestra que la combinación de **edad avanzada** y **creencia fuerte en la eficacia de la vacuna** incrementa la probabilidad de vacunación mucho más de lo que cabría esperar por simple coincidencia.
+
+## Regla 3: Exploración de patrones de hogar en subgrupos poblacionales
+
+Tras completar el estudio de las reglas asociadas a la vacunación, se amplía el análisis hacia aspectos más sociales del conjunto de datos. Para ello, se generan reglas sin imponer un consecuente fijo y se examina el caso de la población identificada como `race = black`, combinando esta variable con información sobre la estructura del hogar (número de adultos y presencia de niños).
+
+```{r, include=FALSE}
+rules_all <- apriori(
+  flu_transaction,
+  parameter = list(
+    support = 0.01,
+    confidence = 0.3,
+    minlen = 1,
+    maxlen = 4
+  )
+)
+```
+
+```{r, echo=FALSE, fig.width=6, fig.height=4}
+
+rules_race_household <- subset(
+  rules_all,
+  subset =
+    lhs %pin% "race=black" &
+    (lhs %pin% "household_adults" | lhs %pin% "household_children")
+)
+redund <- is.redundant(rules_race_household)
+rules_race_household_clean <- rules_race_household[!redund]
+
+# inspect(head(sort(rules_race_household_clean, by="lift"), 20))
+plot(rules_race_household_clean)
+```
+
+```{r, echo=FALSE}
+`rownames<-`(as(head(sort(rules_race_household_clean, by="lift"), 5), "data.frame")[, c("rules","confidence","lift")], NULL)
+```
+
+Entre los resultados destaca la siguiente regla:
+
+\[
+\{\texttt{race = black,\ household\_adults = adults\_0}\}
+\Rightarrow
+\{\texttt{rent\_or\_own = rent}\}
+\]
+
+Esta asociación indica que las personas identificadas como `race = black` que viven solas tienen **más del doble de probabilidad** de residir en alquiler en comparación con la población general (*lift* ≈ 2.23). La confianza de la regla es cercana al 50 %, lo que implica que aproximadamente la mitad de este subgrupo efectivamente vive en alquiler. Este resultado sugiere un patrón residencial específico dentro de este segmento poblacional.
+
+## Regla 4: El consecuente es la población con vivienda propia
+
+Durante el proceso de búsqueda de reglas relacionadas con la **propiedad de vivienda**, se observa que los ingresos altos (`income_poverty = inc_gt_75k`) aparecen de manera dominante. La mayoría de combinaciones que incluyen este nivel de ingresos conducen casi de forma directa a la conclusión de vivienda propia, lo cual resulta poco informativo desde el punto de vista analítico por ser un patrón muy esperado.
+
+Por esta razón, se decide **excluir explícitamente** las reglas cuyo antecedente incluya ingresos elevados, con el fin de revelar asociaciones más sutiles basadas en factores sociales y residenciales.
+
+```{r, echo=FALSE, fig.width=6, fig.height=4}
+rules_house <- subset(
+  rules_all,
+  subset =
+    rhs %pin% "rent_or_own=own" &
+    !lhs %pin% "income_poverty=inc_gt_75k" &
+    !(lhs %pin% "unknown" | rhs %pin% "unknown") &
+    lift >= 1.3
+)
+
+rules_house_clean <- rules_house[!is.redundant(rules_house)]
+
+#inspect(head(sort(rules_house_clean, by="lift"), 100))
+plot(rules_house_clean)
+```
+
+```{r, echo=FALSE}
+`rownames<-`(as(head(sort(rules_house_clean, by="lift"), 5), "data.frame")[, c("rules","confidence","lift")], NULL)
+```
+
+Tras aplicar este filtrado, una de las reglas más interesantes identificadas es la siguiente:
+\[
+\begin{aligned}
+\{&\texttt{marital\_status = married},\ \texttt{census\_msa = msa\_not\_principal\_city},\\
+  &\texttt{employment\_occupation = cmhcxjea}\}
+\Rightarrow
+\{\texttt{rent\_or\_own = own}\}
+\end{aligned}
+\]
+Esta regla presenta una **confianza del 94 %** y un **lift de 1.35**, indicando que este subgrupo tiene una probabilidad significativamente mayor de ser propietario en comparación con la población general. El interés de esta asociación radica en que no depende directamente de ingresos altos, sino de una combinación de **estado civil**, **ubicación en áreas metropolitanas secundarias** y **un tipo específico de ocupación**. Este patrón sugiere un perfil residencial caracterizado por estabilidad laboral y familiar, donde la propiedad de vivienda resulta especialmente frecuente.
+
+## Reglas globales con confianza entre 0.5 y 0.7
+
+En esta sección se adopta un enfoque distinto respecto a las búsquedas anteriores. En lugar de partir de una variable objetivo específica, se filtran todas las reglas generadas según criterios puramente estadísticos:
+
+- confianza entre 0.5 y 0.7  
+- soporte mínimo del 20 %  
+- *lift* mayor o igual que 1.3  
+- exclusión de cualquier ítem con valor *unknown*  
+- eliminación de reglas redundantes
+
+```{r, echo=FALSE, fig.width=6, fig.height=4}
+rules_conf_05_07 <- subset(
+  rules_all,
+  subset = confidence >= 0.5 & confidence <= 0.7 & !(lhs %pin% "unknown" | rhs %pin% "unknown") & support >= 0.20
+)
+
+rules_conf_05_07_lift <- subset(
+  rules_conf_05_07,
+  subset = lift >= 1.3
+)
+
+redundant_flags <- is.redundant(rules_conf_05_07_lift)
+rules_conf_05_07_clean <- rules_conf_05_07_lift[!redundant_flags]
+
+#inspect(head(sort(rules_conf_05_07_clean, by = "lift"), 100))
+plot(rules_conf_05_07_clean)
+```
+
+Este filtrado permite identificar patrones amplios dentro del conjunto de datos, no necesariamente relacionados con la vacunación, pero sí útiles para comprender comportamientos y características sociodemográficas de la muestra. A continuación se presentan dos reglas particularmente llamativas.
+
+### Regla 5: Sociabilidad y estructura del hogar
+
+\[
+\{\texttt{behavioral\_large\_gatherings = yes},\ \texttt{household\_children = children\_0}\}
+\Rightarrow
+\{\texttt{behavioral\_outside\_home = yes}\}
+\]
+
+Esta regla presenta un **soporte cercano al 22 %**, una **confianza alrededor del 69 %** y un **lift superior a 2.05**, lo que indica que este patrón es más del doble de frecuente de lo que se esperaría por puro azar.  
+
+En términos prácticos, esta asociación sugiere que las personas que **participan en grandes reuniones y no tienen hijos** muestran una **tendencia marcada a salir frecuentemente del hogar**. La ausencia de niños parece facilitar horarios más flexibles y mayor disponibilidad, mientras que la participación en eventos grandes apunta a un estilo de vida más social y activo.
+
+### Regla 6: Participación laboral y características demográficas
+
+\[
+\{\texttt{health\_worker = no},\ \texttt{race = white},\ \texttt{sex = female}\}
+\Rightarrow
+\{\texttt{employment\_status = not\_in\_labor\_force}\}
+\]
+
+Esta regla muestra un **soporte del 20 %**, una **confianza cercana al 51 %** y un **lift de alrededor de 1.33**, lo que indica que este grupo tiene una probabilidad moderadamente mayor que la media de encontrarse fuera de la fuerza laboral.  
+
+Aunque no implica relaciones causales, sí se observa un **patrón demográfico consistente**: dentro del subconjunto de **mujeres blancas que no trabajan en el sector sanitario**, la proporción de personas que no participan en el mercado laboral es significativamente mayor que en el conjunto total. Esto sugiere diferencias ocupacionales o roles sociales que se reflejan en la estructura del dataset.
+
+# Reglas con ítems negativos
+
+## Explicación  
+
+En esta sección se incorporan **ítems negativos** dentro del proceso de generación de reglas de asociación. El algoritmo Apriori, por defecto, solo trabaja con la presencia de ítems, por lo que no puede producir reglas del tipo *"si NO ocurre X entonces ocurre Y"*. Para permitirlo, es necesario transformar algunas variables del dataset en un formato que represente explícitamente tanto la presencia como la ausencia de cada una de sus categorías.
+
+Este tipo de reglas amplía el alcance del análisis porque introduce patrones basados no solo en lo que las personas son o hacen, sino también en lo que **no son** o **no hacen**. Esto permite detectar contrastes interesantes en grupos poblacionales y en patrones de decisión.
+
+## Preprocesamiento  
+
+Para evitar una explosión combinatoria, el análisis se centrará únicamente en **dos variables** del problema cuyas categorías son relevantes desde el punto de vista interpretativo:
+
+- `h1n1_knowledge`  
+- `age_group`
+
+Cada una será transformada en un conjunto de variables binarias (una por categoría), donde cada registro tomará el valor `TRUE` si pertenece a esa categoría y `FALSE` en caso contrario. Con ello se podrán generar reglas que incluyan tanto afirmaciones del tipo *"h1n1_knowledge_alot = TRUE"* como negaciones del tipo *"h1n1_knowledge_alot = FALSE"*.
+
+La variable original será eliminada para evitar ambigüedades, y el dataset transaccional se reconstruirá a partir de estas nuevas variables, ya expresadas en términos de presencia y ausencia.
+
+```{r, include=FALSE}
+
+flu_neg <- flu
+
+vars_negative <- c("h1n1_knowledge", "age_group")
+
+for (v in vars_negative) {
+
+  flu_neg[[v]] <- as.factor(flu_neg[[v]])
+  lvls <- levels(flu_neg[[v]])
+  
+  for (l in lvls) {
+    new_var <- paste(v, l, sep = "_")
+    
+    # TRUE si el registro tiene ese nivel, FALSE en caso contrario
+    flu_neg[[new_var]] <- flu_neg[[v]] == l
+    flu_neg[[new_var]][is.na(flu_neg[[new_var]])] <- FALSE
+  }
+  
+  flu_neg[[v]] <- NULL
+}
+
+flu_neg[] <- lapply(
+  flu_neg,
+  function(x) {
+    if (is.logical(x)) {
+      factor(x, levels = c(FALSE, TRUE), labels = c("FALSE", "TRUE"))
+    } else {
+      x
+    }
+  }
+)
+
+flu_neg_transactions <- as(flu_neg, "transactions")
+```
+
+
+## Generación y limpieza de reglas
+Una vez creado el dataset con ítems positivos y negativos, se aplica Apriori con umbrales similares a los usados previamente. Luego se realiza una limpieza en tres pasos:
+
+1. **Filtrado de reglas con confianza perfecta** (`confidence = 1`), porque suelen ser consecuencia de variables **mutuamente excluyentes** (por ejemplo, grupos de edad en formato binario) y aportan poco valor interpretativo.
+2. **Eliminación de redundancia** (reglas equivalentes o contenidas en otras).
+
+```{r, include=FALSE}
+
+rules_neg <- apriori(
+  flu_neg_transactions,
+  parameter = list(
+    support = 0.05,
+    confidence = 0.3,
+    minlen = 2,
+    maxlen = 5
+  )
+)
+
+families <- c("age_group_", "h1n1_knowledge_")
+
+rules_neg <- subset(rules_neg, subset = confidence >= 0.3 & confidence < 1)
+
+rules_neg <- rules_neg[!is.redundant(rules_neg)]
+
+rules_neg_clean <- rules_neg
+```
+
+```{r, include=FALSE}
+# `rownames<-`(as(head(sort(rules_neg_clean, by="lift"), 5), "data.frame")[, c("rules","confidence","lift")], NULL)
+```
+
+Antes de analizar reglas concretas con ítems negativos, se decidió centrar la exploración en **dos variables de interés** que fueron binarizadas durante el preprocesamiento: el **grupo de edad** (`age_group`) y el **nivel de conocimiento sobre la gripe H1N1** (`h1n1_knowledge`). 
+
+### Regla 7: Conductas preventivas y hábitos persistentes en el grupo de edad 55–64
+
+En esta subsección, el foco se sitúa **exclusivamente en las reglas relacionadas con el grupo de edad**, dejando el análisis de `h1n1_knowledge` para un apartado posterior. Para evitar asociaciones triviales, se excluyeron reglas cuyo consecuente correspondiera a otras categorías de edad, de modo que las relaciones identificadas reflejen patrones conductuales reales y no simples consecuencias de categorías mutuamente excluyentes.
+
+```{r, echo=FALSE}
+
+rules_age_lhs <- subset(
+  rules_neg_clean,
+  subset = lhs %pin% "age_group_age_55_64=TRUE" &
+    ! rhs %pin% "age_group_" 
+)
+
+plot(rules_age_lhs)
+
+# inspect(head(rules_age_lhs[order(
+#         quality(rules_age_lhs)$lift,
+#         quality(rules_age_lhs)$support,
+#         decreasing = TRUE)],5))
+```
+
+Dentro del conjunto de reglas obtenidas tras incorporar ítems negativos y filtrar aquellas relacionadas con la edad, destaca especialmente la siguiente asociación:
+
+\[
+\begin{aligned}
+\{&\texttt{behavioral\_avoidance = yes},\ \texttt{behavioral\_wash\_hands = yes},\\
+  &\texttt{age\_group\_age\_55\_64 = TRUE}\}
+\Rightarrow
+\{\texttt{behavioral\_touch\_face = yes}\}
+\end{aligned}
+\]
+
+Esta regla presenta un **soporte aproximado del 11.4%**, una **confianza del 82.3%** y un **lift de 1.22**. Aunque el lift es moderado, la regla resulta especialmente interesante desde un punto de vista interpretativo. En el grupo de personas de 55 a 64 años que declaran adoptar medidas preventivas claras (como evitar situaciones de riesgo y lavarse las manos con frecuencia) se observa, al mismo tiempo, una alta probabilidad de mantener un hábito difícil de controlar, como tocarse la cara.
+
+### Regla 8: Conocimiento, conducta preventiva y percepción de la vacuna H1N1
+
+Dentro del conjunto de reglas obtenidas tras incorporar ítems negativos y filtrar aquellas relacionadas con el nivel de conocimiento sobre la gripe H1N1, destaca especialmente la siguiente asociación:
+
+```{r, echo=FALSE}
+
+rules_knowledge_attitudinal <- subset(
+  rules_neg_clean,
+  subset =
+    lhs %pin% "h1n1_knowledge_a_lot=TRUE" &
+    ! lhs %pin% "seasonal_vaccine" &
+    rhs %pin% "opinion_"
+)
+
+plot(rules_knowledge_attitudinal)
+
+# inspect(head(sort(rules_h1n1_knowledge_lhs, by = "lift"), 100))
+
+```
+
+\[
+\begin{aligned}
+\{&\texttt{behavioral\_wash\_hands = yes},\\
+  &\texttt{h1n1\_knowledge\_a\_lot = TRUE}\}
+\Rightarrow
+\{\texttt{opinion\_h1n1\_vacc\_effective = very}\}
+\end{aligned}
+\]
+
+Esta regla presenta un **soporte aproximado del 10.8%**, una **confianza cercana al 35.2%** y un **lift de 1.31**. La regla indica que, dentro del grupo de personas que declara tener un alto conocimiento sobre la gripe H1N1 y que además adopta conductas preventivas como el lavado frecuente de manos, la proporción de individuos que considera la vacuna H1N1 como *muy efectiva* es mayor que en la población general.
+
+El lift superior a 1 sugiere que la combinación de conocimiento elevado y comportamiento preventivo está asociada con una percepción más favorable sobre la eficacia de la vacuna, aunque dicha percepción no es dominante dentro del grupo, lo que refleja que las actitudes hacia la vacunación pueden diferir incluso entre personas bien informadas y con prácticas preventivas consolidadas.
+
+## Conclusiones
+
+Durante el proceso de minería se identificaron numerosas reglas altamente evidentes, especialmente asociadas a variables dominantes como la vacunación previa o el acceso al sistema sanitario. Estas reglas resultaron útiles para validar el enfoque, pero aportan poca información nueva sobre la estructura del conjunto de datos.
+
+Por este motivo, el objetivo principal del documento se centró en explorar reglas con menor fuerza global, pero con mayor valor interpretativo. Este enfoque permitió identificar patrones más sutiles que ayudan a comprender mejor la composición de la población, las actitudes y comportamientos de los encuestados, así como la coexistencia de prácticas preventivas y percepciones diversas frente a la vacunación.
+
+En este sentido, las reglas analizadas no buscan maximizar métricas como el *lift* o la *confianza*, sino aportar una lectura más rica y matizada del conjunto de datos, poniendo de relieve relaciones que, aunque menos intensas, resultan relevantes para caracterizar a los distintos subgrupos estudiados.
