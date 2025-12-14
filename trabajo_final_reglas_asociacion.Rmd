@@ -1,0 +1,392 @@
+---
+title: "Reglas de Asociación: Trabajo Final"
+author: "Oscar Julian Tinjacá Reyes"
+date: "2025-12-06"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+library(arules)
+library(arulesViz)
+library(tidyverse)
+```
+
+# Introducción
+
+En este trabajo se estudian reglas de asociación a partir de datos reales relacionados con campañas de vacunación frente a la gripe H1N1 y la gripe estacional. El objetivo principal es extraer patrones interesantes que relacionen características demográficas, comportamientos preventivos y opiniones sobre las vacunas con la probabilidad de haber sido vacunado.
+
+El conjunto de datos procede de la competición “Flu Shot Learning: Predict H1N1 and Seasonal Flu Vaccines” de DrivenData, basada en la encuesta nacional estadounidense “National 2009 H1N1 Flu Survey”. Cada instancia representa una persona encuestada y recoge información sobre:
+
+- Nivel de preocupación y conocimiento sobre la gripe H1N1.  
+- Comportamientos de prevención (lavado de manos, uso de mascarilla, evitar contactos, etc.).  
+- Recomendaciones médicas y presencia de condiciones crónicas.  
+- Características demográficas y socioeconómicas (edad, educación, ingresos, estado civil, etc.).  
+- Estructura del hogar y localización geográfica.  
+
+Para cada individuo se dispone de dos variables objetivo binarias:
+
+- `h1n1_vaccine`: indica si recibió la vacuna H1N1.  
+- `seasonal_vaccine`: indica si recibió la vacuna de la gripe estacional.  
+
+En este trabajo, en lugar de plantear un problema de predicción supervisada, se utilizarán técnicas de reglas de asociación para descubrir dependencias y patrones interesantes entre todas estas variables.
+
+# Presentación del dataset
+
+## Descripción general
+
+El dataset original contiene 36 variables:
+
+- `respondent_id`: identificador único y aleatorio del encuestado.  
+- 35 variables predictoras, que incluyen:
+  - Opiniones y percepciones (`h1n1_concern`, `h1n1_knowledge`, `opinion_*`).  
+  - Comportamientos preventivos (`behavioral_*`).  
+  - Variables de salud y recomendación médica (`doctor_recc_*`, `chronic_med_condition`, etc.).  
+  - Variables demográficas y socioeconómicas (`age_group`, `education`, `race`, `sex`, `income_poverty`, etc.).  
+  - Estructura del hogar (`household_adults`, `household_children`).  
+  - Variables geográficas (`hhs_geo_region`, `census_msa`).  
+  - Sector e industria de empleo (`employment_industry`, `employment_occupation`).  
+
+Adicionalmente, se dispone de las dos variables objetivo:
+
+- `h1n1_vaccine` (0 = no vacunado, 1 = vacunado).  
+- `seasonal_vaccine` (0 = no vacunado, 1 = vacunado).
+
+### Fuente de los datos
+
+Los datos originales están disponibles públicamente en la plataforma DrivenData dentro de la competición:
+
+- “Flu Shot Learning: Predict H1N1 and Seasonal Flu Vaccines”  
+  https://www.drivendata.org/competitions/66/flu-shot-learning/  
+
+La descripción detallada de las variables puede consultarse en la página oficial del problema:
+
+- Problem description  
+  https://www.drivendata.org/competitions/66/flu-shot-learning/page/211/
+
+## Carga y unión de los datos
+
+En primer lugar se cargan los ficheros de características (`training_set_features.csv`) y etiquetas (`training_set_labels.csv`), y se unen por la columna común `respondent_id`.
+
+```{r}
+# Cargar datos (ajusta la ruta si hace falta)
+features <- read.csv("data/training_set_features.csv",
+                     stringsAsFactors = FALSE,
+                     na.strings = c("NA", "NaN", ""))
+labels   <- read.csv("data/training_set_labels.csv",
+                     stringsAsFactors = FALSE,
+                     na.strings = c("NA", "NaN", ""))
+
+# Unir por la primera columna: respondent_id
+flu_raw <- inner_join(features, labels, by = "respondent_id")
+
+# Comprobación rápida
+str(flu_raw[, 1:10])
+```
+
+# Preprocesamiento de los datos
+
+El objetivo del preprocesamiento es adaptar el dataset a un formato adecuado para el uso de `arules`. En particular:
+
+- Todas las variables deben ser factores (nominales u ordinales).  
+- Los valores ausentes deben tratarse de forma coherente, diferenciando entre variables donde el “desconocido” es informativo y variables donde el NA simplemente indica “no respuesta”.  
+- Los niveles de los factores se renombrarán a un formato consistente (snake_case) para facilitar la interpretación de las reglas.
+
+## Funciones auxiliares
+
+Se definen funciones auxiliares para transformar variables binarias y ordinales.
+
+```{r}
+## =========================================================
+## Helpers: funciones para factores
+## =========================================================
+
+bin_factor <- function(x) {
+  factor(x, levels = c(0, 1), labels = c("no", "yes"))
+}
+
+ord_factor <- function(x, levels, labels = levels) {
+  factor(x, levels = levels, labels = labels, ordered = TRUE)
+}
+```
+
+## Conversión de variables a factores
+
+```{r}
+## =========================================================
+## Partimos del dataset unido
+## =========================================================
+
+flu <- flu_raw
+
+## =========================================================
+## 1) Variables ordinales tipo Likert
+## =========================================================
+
+flu$h1n1_concern <- ord_factor(
+  flu$h1n1_concern,
+  levels = c(0, 1, 2, 3),
+  labels = c("not_at_all", "not_very", "somewhat", "very")
+)
+
+flu$h1n1_knowledge <- ord_factor(
+  flu$h1n1_knowledge,
+  levels = c(0, 1, 2),
+  labels = c("no_knowledge", "a_little", "a_lot")
+)
+
+flu$opinion_h1n1_vacc_effective <- ord_factor(
+  flu$opinion_h1n1_vacc_effective,
+  levels = 1:5,
+  labels = c("not_at_all", "not_very", "dont_know", "somewhat", "very")
+)
+
+flu$opinion_h1n1_risk <- ord_factor(
+  flu$opinion_h1n1_risk,
+  levels = 1:5,
+  labels = c("very_low", "somewhat_low", "dont_know", "somewhat_high", "very_high")
+)
+
+flu$opinion_h1n1_sick_from_vacc <- ord_factor(
+  flu$opinion_h1n1_sick_from_vacc,
+  levels = 1:5,
+  labels = c("not_at_all", "not_very", "dont_know", "somewhat", "very")
+)
+
+flu$opinion_seas_vacc_effective <- ord_factor(
+  flu$opinion_seas_vacc_effective,
+  levels = 1:5,
+  labels = c("not_at_all", "not_very", "dont_know", "somewhat", "very")
+)
+
+flu$opinion_seas_risk <- ord_factor(
+  flu$opinion_seas_risk,
+  levels = 1:5,
+  labels = c("very_low", "somewhat_low", "dont_know", "somewhat_high", "very_high")
+)
+
+flu$opinion_seas_sick_from_vacc <- ord_factor(
+  flu$opinion_seas_sick_from_vacc,
+  levels = 1:5,
+  labels = c("not_at_all", "not_very", "dont_know", "somewhat", "very")
+)
+
+## =========================================================
+## 2) Variables binarias (comportamientos y salud)
+## =========================================================
+
+binary_behavioral <- c(
+  "behavioral_antiviral_meds",
+  "behavioral_avoidance",
+  "behavioral_face_mask",
+  "behavioral_wash_hands",
+  "behavioral_large_gatherings",
+  "behavioral_outside_home",
+  "behavioral_touch_face"
+)
+
+flu[binary_behavioral] <- lapply(flu[binary_behavioral], bin_factor)
+
+binary_health <- c(
+  "doctor_recc_h1n1",
+  "doctor_recc_seasonal",
+  "chronic_med_condition",
+  "child_under_6_months",
+  "health_worker",
+  "health_insurance"
+)
+
+flu[binary_health] <- lapply(flu[binary_health], bin_factor)
+
+## Targets (variables objetivo)
+flu$h1n1_vaccine     <- bin_factor(flu$h1n1_vaccine)
+flu$seasonal_vaccine <- bin_factor(flu$seasonal_vaccine)
+
+## =========================================================
+## 3) Categóricas nominales
+## =========================================================
+
+cat_vars <- c(
+  "age_group",
+  "education",
+  "race",
+  "sex",
+  "income_poverty",
+  "marital_status",
+  "rent_or_own",
+  "employment_status",
+  "hhs_geo_region",
+  "census_msa",
+  "employment_industry",
+  "employment_occupation"
+)
+
+flu[cat_vars] <- lapply(flu[cat_vars], factor)
+
+## =========================================================
+## 4) Recuentos de hogar como ordinales
+## =========================================================
+
+flu$household_adults <- ord_factor(
+  flu$household_adults,
+  levels = 0:3,
+  labels = c("adults_0", "adults_1", "adults_2", "adults_3plus")
+)
+
+flu$household_children <- ord_factor(
+  flu$household_children,
+  levels = 0:3,
+  labels = c("children_0", "children_1", "children_2", "children_3plus")
+)
+```
+
+## Tratamiento de valores ausentes
+
+En las variables nominales y en las relacionadas con la estructura del hogar, los valores ausentes (`NA`) se convierten en una categoría explícita `"unknown"` para evitar la pérdida de información y poder analizar patrones asociados a la falta de respuesta o información desconocida. En cambio, en las variables binarias y ordinales de opinión, los NA se mantienen, de forma que no generan ítems artificiales en el conjunto de transacciones.
+
+```{r}
+## =========================================================
+## 5) NA -> "unknown" SOLO en nominales + household
+## =========================================================
+
+vars_nominal <- c(
+  "age_group",
+  "education",
+  "race",
+  "sex",
+  "income_poverty",
+  "marital_status",
+  "rent_or_own",
+  "employment_status",
+  "hhs_geo_region",
+  "census_msa",
+  "employment_industry",
+  "employment_occupation"
+)
+
+vars_household <- c("household_adults", "household_children")
+
+vars_unknown <- c(vars_nominal, vars_household)
+
+for (v in vars_unknown) {
+  flu[[v]] <- addNA(flu[[v]])                        # convierte NA en nivel del factor
+  levels(flu[[v]])[is.na(levels(flu[[v]]))] <- "unknown"  # renombra ese nivel como "unknown"
+}
+```
+
+## Renombrado de niveles (snake_case)
+
+Para facilitar la interpretación de las reglas de asociación, se renombraron los niveles de algunas variables nominales a un formato consistente en snake_case.
+
+```{r}
+## =========================================================
+## 6) Renombrar niveles específicos para consistencia (snake_case)
+## =========================================================
+
+## age_group
+levels(flu$age_group)[levels(flu$age_group) == "18 - 34 Years"] <- "age_18_34"
+levels(flu$age_group)[levels(flu$age_group) == "35 - 44 Years"] <- "age_35_44"
+levels(flu$age_group)[levels(flu$age_group) == "45 - 54 Years"] <- "age_45_54"
+levels(flu$age_group)[levels(flu$age_group) == "55 - 64 Years"] <- "age_55_64"
+levels(flu$age_group)[levels(flu$age_group) == "65+ Years"]     <- "age_65plus"
+# "unknown" ya está en minúsculas
+
+## education
+levels(flu$education)[levels(flu$education) == "< 12 Years"]       <- "edu_lt_12"
+levels(flu$education)[levels(flu$education) == "12 Years"]         <- "edu_12"
+levels(flu$education)[levels(flu$education) == "Some College"]     <- "edu_some_college"
+levels(flu$education)[levels(flu$education) == "College Graduate"] <- "edu_college_grad"
+
+## income_poverty
+levels(flu$income_poverty)[levels(flu$income_poverty) == "<= $75,000, Above Poverty"] <- "inc_leq_75k_above_pov"
+levels(flu$income_poverty)[levels(flu$income_poverty) == "> $75,000"]                 <- "inc_gt_75k"
+levels(flu$income_poverty)[levels(flu$income_poverty) == "Below Poverty"]             <- "inc_below_pov"
+
+## marital_status
+levels(flu$marital_status)[levels(flu$marital_status) == "Married"]      <- "married"
+levels(flu$marital_status)[levels(flu$marital_status) == "Not Married"]  <- "not_married"
+
+## race
+levels(flu$race)[levels(flu$race) == "Black"]              <- "black"
+levels(flu$race)[levels(flu$race) == "Hispanic"]           <- "hispanic"
+levels(flu$race)[levels(flu$race) == "White"]              <- "white"
+levels(flu$race)[levels(flu$race) == "Other or Multiple"]  <- "other_multiple"
+
+## sex
+levels(flu$sex)[levels(flu$sex) == "Female"] <- "female"
+levels(flu$sex)[levels(flu$sex) == "Male"]   <- "male"
+
+## rent_or_own
+levels(flu$rent_or_own)[levels(flu$rent_or_own) == "Own"]  <- "own"
+levels(flu$rent_or_own)[levels(flu$rent_or_own) == "Rent"] <- "rent"
+
+## employment_status
+levels(flu$employment_status)[levels(flu$employment_status) == "Employed"]            <- "employed"
+levels(flu$employment_status)[levels(flu$employment_status) == "Unemployed"]          <- "unemployed"
+levels(flu$employment_status)[levels(flu$employment_status) == "Not in Labor Force"]  <- "not_in_labor_force"
+
+## census_msa
+levels(flu$census_msa)[levels(flu$census_msa) == "MSA, Not Principle  City"] <- "msa_not_principal_city"
+levels(flu$census_msa)[levels(flu$census_msa) == "MSA, Principle City"]      <- "msa_principal_city"
+levels(flu$census_msa)[levels(flu$census_msa) == "Non-MSA"]                  <- "non_msa"
+```
+
+### Comprobación final de la estructura
+
+```{r}
+## =========================================================
+## 7) Comprobación final de estructura
+## =========================================================
+
+str(flu)
+```
+
+# Exploración descriptiva de las variables
+
+(Sección para añadir tablas de frecuencia, gráficos de barras, análisis de distribución de niveles, etc.)
+
+Ejemplos posibles:
+
+- Tablas de frecuencia de las variables nominales.  
+- Distribución de las percepciones (`opinion_*`).  
+- Porcentajes de vacunados vs. no vacunados.
+
+# Construcción del conjunto de transacciones
+
+(En esta sección se construirá el objeto de clase `transactions` a partir del data frame `flu`, decidiendo si se incluye o no la variable `respondent_id`, y cómo tratar las variables objetivo.)
+
+Ejemplo orientativo (para adaptar):
+
+```{r, eval=FALSE}
+# Seleccionar variables para reglas (ejemplo, sin respondent_id)
+flu_for_arules <- flu %>%
+  select(-respondent_id)
+
+# Convertir a transacciones
+flu_trans <- as(flu_for_arules, "transactions")
+
+summary(flu_trans)
+```
+
+# Extracción de itemsets frecuentes
+
+(Sección para aplicar `apriori` o `eclat` y obtener itemsets frecuentes, analizar tamaños, soportes, itemsets cerrados y maximales, etc.)
+
+# Generación de reglas de asociación
+
+(Sección para extraer reglas con `apriori`, ajustar umbrales de soporte y confianza, filtrar por `lift`, eliminar reglas redundantes y seleccionar reglas interesantes. Se pueden diferenciar, por ejemplo, reglas que predicen `h1n1_vaccine = "yes"` y `seasonal_vaccine = "yes"`.)
+
+# Reglas con ítems negativos
+
+(Sección específica para la parte del trabajo donde se introducen ítems negativos. Aquí se explicará qué variables se han elegido para codificar ítems negativos, cómo se han construido y qué tipo de reglas se obtienen.)
+
+# (Opcional) Reglas cuantitativas / MOPNAR
+
+(Sección opcional si se decide trabajar con reglas cuantitativas usando RKEEL o métodos tipo MOPNAR. Se puede describir brevemente el enfoque, cómo se adaptarían las variables numéricas si fuera necesario y comparar con las reglas binarias/ordinales.)
+
+# Conclusiones
+
+(En esta sección se resumirán los patrones más relevantes encontrados, se discutirá su interpretación en el contexto del problema de vacunación y se comentarán las limitaciones del análisis y posibles extensiones futuras.)
